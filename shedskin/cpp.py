@@ -152,6 +152,8 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
         self.namer = CPPNamer(self.gx, self)
         self.extmod = extmod.ExtensionModule(self.gx, self)
         self.done: set[ast.AST]
+        self.stack_target_var = None
+        self.stack_init_mode: bool = False
 
     def cpp_name(self, obj: Any) -> str:
         """Generate a C++ name for an object"""
@@ -1158,7 +1160,17 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
         if ts.startswith("pyseq") or ts.startswith("pyiter"):  # XXX
             argtypes = self.gx.merged_inh[node]
         ts = typestr.typestr(self.gx, argtypes, mv=self.mv)
-        self.append("(new " + ts[:-2] + "(")
+        if (
+            self.stack_init_mode
+            and self.stack_target_var.stack_allocable
+        ):
+            # if value type is pointer, get rid of that and the new
+            value_type = ts.rstrip()
+            if value_type.endswith("*"):
+                value_type = value_type[:-1].rstrip()
+            self.append(value_type + "(")
+        else:
+            self.append("(new " + ts[:-2] + "(")
         return argtypes
 
     def visit_Dict(
@@ -1226,7 +1238,15 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
                 self.impl_visit_conv(child, type_child, func)
                 if child != children[-1]:
                     self.append(",")
-        self.append("))")
+        if (
+            self.stack_init_mode
+            and self.stack_target_var
+            and self.stack_target_var.stack_allocable
+            and self.stack_target_var.stack_storage_name
+        ):
+            self.append(")")
+        else:
+            self.append("))")
 
     def visit_Tuple(
         self,
@@ -3499,13 +3519,27 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
 
                 # name = expr
                 elif isinstance(lvalue, ast.Name):
-                    vartypes = self.mergeinh[
-                        python.lookup_var(lvalue.id, func, self.mv)
-                    ]
-                    self.visit(lvalue, func)
-                    self.append(" = ")
-                    self.impl_visit_conv(rvalue, vartypes, func)
-                    self.eol()
+                    target_var = python.lookup_var(lvalue.id, func, self.mv)
+                    vartypes = self.mergeinh[target_var]
+                    if (
+                        target_var.stack_allocable
+                        and isinstance(rvalue, ast.Tuple)
+                    ):
+                        storage_cpp = self.namer.name_str(
+                            target_var.stack_storage_name
+                        )
+                        self.start("")
+                        self.append(storage_cpp + " = ")
+                        self.stack_target_var = target_var
+                        self.stack_init_mode = True
+                        self.impl_visit_conv(rvalue, vartypes, func)
+                        self.stack_init_mode = False
+                        self.eol()
+                    else:
+                        self.visit(lvalue, func)
+                        self.append(" = ")
+                        self.impl_visit_conv(rvalue, vartypes, func)
+                        self.eol()
 
                 # (a,(b,c), ..) = expr
                 elif ast_utils.is_assign_list_or_tuple(lvalue):
@@ -3722,18 +3756,41 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
 
     def local_defs(self, func: python.Function) -> None:
         """Generate local definitions for a function"""
-        pairs = []
+        heap_pairs = []
+        stack_lines = []
+
         for name, var in func.vars.items():
-            if not var.invisible and (
-                not hasattr(func, "formals") or name not in func.formals
+            if var.invisible or (
+                hasattr(func, "formals") and name in func.formals
             ):  # XXX
-                pairs.append(
-                    (
-                        typestr.nodetypestr(self.gx, var, func, mv=self.mv),
-                        self.cpp_name(var),
-                    )
-                )
-        self.output(self.indentation.join(self.group_declarations(pairs)))
+                continue
+
+            type_str = typestr.nodetypestr(self.gx, var, func, mv=self.mv)
+            cpp_name = self.cpp_name(var)
+
+            if var.stack_allocable:
+                storage_cpp_name = self.namer.name_str(var.stack_storage_name)
+
+                # we also need the actual value type for the storage variable, not the pointer type
+                # the pointer type is just a pointer to the storage variable
+                value_type = type_str.rstrip()
+                if value_type.endswith("*"):
+                    value_type = value_type[:-1].rstrip()
+
+                # generate the storage variable and the pointer to it
+                stack_lines.append(f"{value_type} {storage_cpp_name};\n")
+                stack_lines.append(f"{value_type} *{cpp_name} = &{storage_cpp_name};\n")
+            else:
+                # this is the same as what the original code was doing before
+                heap_pairs.append((type_str, cpp_name))
+
+        lines = []
+        if heap_pairs:
+            lines.extend(self.group_declarations(heap_pairs))
+        if stack_lines:
+            lines.extend(stack_lines)
+
+        self.output(self.indentation.join(lines))
 
     # --- nested for loops: loop headers, if statements
     def listcomp_rec(

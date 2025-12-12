@@ -339,6 +339,13 @@ class Variable:
         self.wopper: Optional[ast.AST] = None
         self.const_assign: List[ast.Constant] = []
 
+        # tells us if escapes and whether it meets our other conditions (e.x. being a tuple). Decoupling this from self.escapes makes it easier to expand the project beyond tuples etc.
+        self.stack_allocable: bool = False
+
+        # tells us if the variable escapes
+        self.escapes: bool = False
+        self.stack_storage_name: Optional[str] = None
+
     def masks_global(self) -> bool:
         """Check if a variable masks a global variable"""
         if isinstance(self.parent, Class):

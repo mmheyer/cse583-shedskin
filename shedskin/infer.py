@@ -2113,6 +2113,10 @@ def analyze(gx: "config.GlobalInfo", module_name: str) -> None:
     # --- cartesian product algorithm & iterative flow analysis
     iterative_dataflow_analysis(gx)
 
+    analyze_escape(gx)
+
+    analyze_stack_allocable(gx)
+
     logger.info("[generating c++ code..]")
 
     for cl in gx.allclasses:
@@ -2203,3 +2207,73 @@ def default_var(
 def var_types(gx: "config.GlobalInfo", var: "python.Variable") -> Types:
     """Get the types of a variable"""
     return inode(gx, var).types()
+
+def bfs(gx: "config.GlobalInfo", start_node: CNode, end_node: CNode) -> bool:
+    visited = set()
+    q = [start_node]
+
+    while len(q) > 0:
+        current = q[0]
+        q.pop(0)
+
+        if current is end_node:
+            return True
+
+        for next_node in current.out:
+            if next_node not in visited:
+                visited.add(next_node)
+                q.append(next_node)
+
+    return False
+
+def analyze_escape(gx: "config.GlobalInfo") -> None:
+    for func in gx.allfuncs:
+        if func.mv.module.builtin:
+            continue 
+        for var_name, var in func.vars.items():
+            if var.formal_arg:
+                continue
+            
+            # if there's no constraint node associated with this variable then ignore
+            if (var, 0, 0) not in gx.cnode:
+                continue
+            
+            variable_node = gx.cnode[(var, 0, 0)]
+
+            return_node = func.retnode
+
+            # oversimplifying, but rn we are just assuming that no return means everything can be stack allocated
+            # TODO: later, check for other ways the var could escape liek being stored in global or heap-allocated thing etc
+            if not return_node:
+                var.escapes = False
+
+            # bfs to see whether the variable ever escapes through the return node
+            if bfs(gx, variable_node, return_node):
+                var.escapes = True
+            else:
+                var.escapes = False
+        
+            print(f"func: {func.ident}, var.name: {var.name}, var.escapes: {var.escapes}")
+
+def analyze_stack_allocable(gx: "config.GlobalInfo") -> None:
+    for func in gx.allfuncs:
+        if func.mv.module.builtin:
+            continue 
+        for var_name, var in func.vars.items():
+            if var.formal_arg or var.escapes or (var, 0, 0) not in gx.cnode:
+                var.stack_allocable = False
+                continue
+
+            var_type = var_types(gx, var)
+            var.stack_allocable = False
+            var.stack_storage_name = None
+
+            for cl, _ in var_type:
+                if cl.ident == "tuple2":
+                    var.stack_allocable = True
+                    var.stack_storage_name = f"{var.name}_storage"
+                    break
+
+            print(
+                f"func: {func.ident}, var.name: {var.name}, stack allocable: {var.stack_allocable}"
+            )
