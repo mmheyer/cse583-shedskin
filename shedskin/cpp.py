@@ -2736,6 +2736,7 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
             anon_func,
         ) = infer.analyze_callfunc(self.gx, node, merge=self.gx.merged_inh)
         funcs = infer.callfunc_targets(self.gx, node, self.gx.merged_inh)
+        stack_ctor = False
 
         if self.library_func(funcs, "re", None, "findall") or self.library_func(
             funcs, "re", "re_object", "findall"
@@ -2834,7 +2835,21 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
                     if ts.startswith("pyseq") or ts.startswith("pyiter"):  # XXX
                         argtypes = self.gx.merged_inh[node]
                         ts = typestr.typestr(self.gx, argtypes, mv=self.mv)
-                self.append("(new " + ts[:-2] + "(")
+
+                # when translating a constructor call that targets a stack-allocable
+                # local, construct directly into the pre-declared storage instead of using new
+                if (
+                    self.stack_init_mode
+                    and self.stack_target_var.stack_allocable
+                ):
+                    stack_ctor = True
+                    value_type = ts.rstrip()
+                    if value_type.endswith("*"):
+                        value_type = value_type[:-1].rstrip()
+                    self.append(value_type + "(")
+                else:
+                    self.append("(new " + ts[:-2] + "(")
+
             if funcs and len(funcs[0].formals) == 1 and not funcs[0].mv.module.builtin:
                 self.append("1")  # don't call default constructor
 
@@ -2991,7 +3006,7 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
             return
 
         if not funcs:
-            if constructor:
+            if constructor and not stack_ctor:
                 self.append(")")
             self.append(")")
             return
@@ -2999,7 +3014,7 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
         self.visit_callfunc_args(funcs, node, func)
 
         self.append(")")
-        if constructor:
+        if constructor and not stack_ctor:
             self.append(")")
 
     def bool_test(
@@ -3521,9 +3536,21 @@ class GenerateVisitor(ast_utils.BaseNodeVisitor):
                 elif isinstance(lvalue, ast.Name):
                     target_var = python.lookup_var(lvalue.id, func, self.mv)
                     vartypes = self.mergeinh[target_var]
+                    stack_init = False
+                    # detect when RHS is a literal tuple or constructor call so we can
+                    # emit initialization into stack storage instead of using new
+                    if isinstance(rvalue, ast.Tuple):
+                        stack_init = True
+                    elif isinstance(rvalue, ast.Call):
+                        (
+                            _, _, _, _, constructor_call, _, _,
+                        ) = infer.analyze_callfunc(
+                            self.gx, rvalue, merge=self.gx.merged_inh
+                        )
+                        stack_init = constructor_call
                     if (
                         target_var.stack_allocable
-                        and isinstance(rvalue, ast.Tuple)
+                        and stack_init
                     ):
                         storage_cpp = self.namer.name_str(
                             target_var.stack_storage_name

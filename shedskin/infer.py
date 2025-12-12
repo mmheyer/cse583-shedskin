@@ -2268,11 +2268,18 @@ def analyze_stack_allocable(gx: "config.GlobalInfo") -> None:
             var.stack_allocable = False
             var.stack_storage_name = None
 
+            # require all observed types to be stack-friendly
+            stack_candidate = False
             for cl, _ in var_type:
-                if cl.ident == "tuple2":
-                    var.stack_allocable = True
-                    var.stack_storage_name = f"{var.name}_storage"
+                if cl.ident == "tuple2" or (isinstance(cl, python.Class) and not cl.module.builtin):
+                    stack_candidate = True
+                else:
+                    stack_candidate = False
                     break
+
+            if stack_candidate:
+                var.stack_allocable = True
+                var.stack_storage_name = f"{var.name}_storage"
 
             print(
                 f"func: {func.ident}, var.name: {var.name}, stack allocable: {var.stack_allocable}"

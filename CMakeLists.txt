@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18.4)
 
-project(test_stack_alloc_project LANGUAGES CXX)
+project(test_class_alloc_project LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -144,6 +144,6 @@ endif()
 # add subdirectories here
 add_shedskin_product(
     BUILD_EXECUTABLE
-    NAME test_stack_alloc
-    MAIN_MODULE test_stack_alloc.py
+    NAME test_class_alloc
+    MAIN_MODULE test_class_alloc.py
 )
